@@ -189,9 +189,12 @@ Deno.serve(async (req: Request) => {
     let authUser = null;
     
     try {
-      const { data: authUserData, error: authCheckError } = await admin.auth.admin.getUserByEmail(cleanEmail);
+      const { data: { users }, error: authCheckError } = await admin.auth.admin.listUsers({
+        page: 1,
+        perPage: 1000
+      });
       
-      if (authCheckError && authCheckError.message !== 'User not found') {
+      if (authCheckError) {
         console.error('🚨 Error checking auth user:', authCheckError);
         return new Response(
           JSON.stringify({ 
@@ -202,7 +205,8 @@ Deno.serve(async (req: Request) => {
         );
       }
       
-      authUser = authUserData?.user;
+      // Find user by email in the list
+      authUser = users.find(user => user.email === cleanEmail) || null;
       console.log('✅ Auth user check completed. Exists:', !!authUser);
     } catch (authError: any) {
       console.error('💥 Auth user check exception:', authError);

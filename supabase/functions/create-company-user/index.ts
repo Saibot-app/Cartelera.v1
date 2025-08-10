@@ -184,35 +184,126 @@ Deno.serve(async (req: Request) => {
       console.log('ℹ️ Step 1: No company_id provided, skipping company verification');
     }
 
-    // Step 2: Check if user already exists in public.users table
-    console.log('🔍 Step 2: Checking if user exists in public.users table...');
-    const { data: existingUser, error: checkUserError } = await admin
-      .from('users')
-      .select('id, email, company_id, role')
-      .eq('email', cleanEmail)
-      .maybeSingle()
-
-    if (checkUserError) {
-      console.error('🚨 Error checking existing user with SERVICE_ROLE:', checkUserError);
-      console.log('❌ Returning error response: Failed to check user profile');
+    // Step 2: Check if user exists in auth.users
+    console.log('🔍 Step 2: Checking if user exists in auth.users...');
+    let authUser = null;
+    
+    try {
+      const { data: authUserData, error: authCheckError } = await admin.auth.admin.getUserByEmail(cleanEmail);
+      
+      if (authCheckError && authCheckError.message !== 'User not found') {
+        console.error('🚨 Error checking auth user:', authCheckError);
+        return new Response(
+          JSON.stringify({ 
+            success: false,
+            error: `Failed to check auth user: ${authCheckError.message}`
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      authUser = authUserData?.user;
+      console.log('✅ Auth user check completed. Exists:', !!authUser);
+    } catch (authError: any) {
+      console.error('💥 Auth user check exception:', authError);
       return new Response(
         JSON.stringify({ 
           success: false,
-          error: `Failed to check existing user (SERVICE_ROLE Error): ${checkUserError.message}`
+          error: `Auth user check failed: ${authError.message}`
         }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    let userId: string;
+    // Step 3: Create auth user if doesn't exist
+    if (!authUser) {
+      console.log('➕ Step 3: Creating new auth user...');
+      const userPassword = payload.password || generateSecurePassword();
+      
+      const { data: createResult, error: createError } = await admin.auth.admin.createUser({
+        email: cleanEmail,
+        password: userPassword,
+        email_confirm: true,
+        user_metadata: {
+          full_name: full_name
+        }
+      });
+
+      if (createError) {
+        console.error('🚨 Auth user creation failed:', createError);
+        return new Response(
+          JSON.stringify({ 
+            success: false,
+            error: `Failed to create auth user: ${createError.message}`
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      authUser = createResult.user;
+      console.log('✅ Auth user created:', authUser?.id);
+    } else {
+      console.log('ℹ️ Step 3: Using existing auth user:', authUser.id);
+      
+      // Update password if provided
+      if (payload.password) {
+        console.log('🔄 Updating auth user password...');
+        const { error: updateError } = await admin.auth.admin.updateUserById(authUser.id, {
+          password: payload.password
+        });
+        
+        if (updateError) {
+          console.error('🚨 Password update failed:', updateError);
+          return new Response(
+            JSON.stringify({ 
+              success: false,
+              error: `Failed to update password: ${updateError.message}`
+            }),
+            { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        console.log('✅ Password updated successfully');
+      }
+    }
+
+    if (!authUser?.id) {
+      console.error('🚨 No auth user ID available');
+      return new Response(
+        JSON.stringify({ 
+          success: false,
+          error: 'Failed to get auth user ID'
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const userId = authUser.id;
+
+    // Step 4: Check if user exists in public.users table
+    console.log('🔍 Step 4: Checking if user exists in public.users table...');
+    const { data: existingUser, error: checkUserError } = await admin
+      .from('users')
+      .select('id, email, company_id, role')
+      .eq('id', userId)
+      .maybeSingle()
+
+    if (checkUserError) {
+      console.error('🚨 Error checking existing user with SERVICE_ROLE:', checkUserError);
+      console.log('❌ Returning error response: Failed to check public user');
+      return new Response(
+        JSON.stringify({ 
+          success: false,
+          error: `Failed to check public user (SERVICE_ROLE Error): ${checkUserError.message}`
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     let userResult: any;
 
     if (!existingUser) {
-      // Step 3: Create user directly in public.users table (bypassing Auth)
-      console.log('➕ Step 3: Creating user directly in public.users table (bypassing Auth)...');
-      
-      // Generate a UUID for the user
-      userId = crypto.randomUUID();
+      // Step 5: Create user in public.users table
+      console.log('➕ Step 5: Creating user in public.users table...');
       
       const { data: newUser, error: insertError } = await admin
         .from('users')
@@ -229,7 +320,7 @@ Deno.serve(async (req: Request) => {
         .single()
 
       if (insertError) {
-        console.error('🚨 Direct user creation failed with SERVICE_ROLE:', insertError);
+        console.error('🚨 Public user creation failed with SERVICE_ROLE:', insertError);
         console.log('❌ Returning error response: Failed to create user record');
         return new Response(
           JSON.stringify({ 
@@ -241,11 +332,10 @@ Deno.serve(async (req: Request) => {
       }
       
       userResult = newUser;
-      console.log('✅ User created directly in database:', userResult);
+      console.log('✅ Public user created:', userResult);
     } else {
-      // Step 3: Update existing user
-      console.log('🔄 Step 3: Updating existing user record with SERVICE_ROLE...');
-      userId = existingUser.id;
+      // Step 5: Update existing user in public.users
+      console.log('🔄 Step 5: Updating existing user record with SERVICE_ROLE...');
       
       const { data: updatedUser, error: updateError } = await admin
         .from('users')
@@ -275,9 +365,9 @@ Deno.serve(async (req: Request) => {
       console.log('✅ User record updated successfully with SERVICE_ROLE');
     }
 
-    // Step 4: Handle company_users relationship (only if company_id provided)
+    // Step 6: Handle company_users relationship (only if company_id provided)
     if (company_id) {
-      console.log('🏢 Step 4: Creating/updating company_users relationship with SERVICE_ROLE...');
+      console.log('🏢 Step 6: Creating/updating company_users relationship with SERVICE_ROLE...');
       
       const { data: companyUserResult, error: relationError } = await admin
         .from('company_users')
@@ -300,6 +390,7 @@ Deno.serve(async (req: Request) => {
         if (!existingUser) {
           console.log('🧹 Cleaning up: Deleting created user due to company relationship failure...');
           await admin.from('users').delete().eq('id', userId);
+          await admin.auth.admin.deleteUser(userId);
         }
         
         return new Response(
@@ -314,7 +405,7 @@ Deno.serve(async (req: Request) => {
       console.log('✅ Company relationship created:', companyUserResult);
       console.log('✅ Company relationship created/updated successfully with SERVICE_ROLE');
     } else {
-      console.log('ℹ️ Step 4: No company_id provided, skipping company_users relationship');
+      console.log('ℹ️ Step 6: No company_id provided, skipping company_users relationship');
     }
 
     console.log('🎉 User creation/assignment completed successfully!');
@@ -326,7 +417,7 @@ Deno.serve(async (req: Request) => {
         success: true,
         message: existingUser 
           ? 'User updated successfully'
-          : 'User created successfully (bypassing Auth)',
+          : 'User created successfully',
         user: {
           id: userId,
           email: cleanEmail,

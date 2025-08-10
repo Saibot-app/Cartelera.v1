@@ -13,7 +13,15 @@ export function useAuth() {
       setLoading(false)
     }).catch(async (error) => {
       console.warn('Session retrieval failed, clearing invalid tokens:', error)
-      await supabase.auth.signOut()
+      try {
+        await supabase.auth.signOut()
+      } catch (signOutError: any) {
+        if (signOutError.message?.includes('Session from session_id claim in JWT does not exist')) {
+          console.info('Invalid session cleared successfully - no active session to sign out')
+        } else {
+          console.warn('Sign out error:', signOutError)
+        }
+      }
       setUser(null)
       setLoading(false)
     })
